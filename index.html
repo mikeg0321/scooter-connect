@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ScooterLink - Bluetooth Scooter Control</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0f1117">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ScooterLink">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>ScooterLink</h1>
+      <p class="subtitle">Bluetooth Scooter Control</p>
+    </header>
+
+    <!-- Connection Screen -->
+    <section id="connect-screen">
+      <div class="icon-circle">
+        <svg viewBox="0 0 24 24" width="64" height="64" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M6.5 6.5l11 11L12 23V1l5.5 5.5-11 11"/>
+        </svg>
+      </div>
+      <p class="prompt-text">Connect to your scooter via Bluetooth</p>
+      <button id="btn-connect" class="btn-primary">Scan for Scooters</button>
+      <p id="connect-error" class="error-text hidden"></p>
+      <div id="bt-unsupported" class="warning hidden">
+        Your browser does not support Web Bluetooth.<br>
+        Use Chrome on desktop or Android.
+      </div>
+    </section>
+
+    <!-- Dashboard Screen -->
+    <section id="dashboard-screen" class="hidden">
+      <div class="device-info">
+        <span class="status-dot connected"></span>
+        <span id="device-name">Scooter</span>
+        <button id="btn-disconnect" class="btn-small btn-outline">Disconnect</button>
+      </div>
+
+      <!-- Stats Row -->
+      <div class="stats-row">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-battery">--%</div>
+          <div class="stat-label">Battery</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-speed">0</div>
+          <div class="stat-label">km/h</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-distance">0.0</div>
+          <div class="stat-label">km</div>
+        </div>
+      </div>
+
+      <!-- Speed Mode Selector -->
+      <div class="section-card">
+        <h2>Speed Mode</h2>
+        <div class="speed-modes three-col">
+          <button class="mode-btn" data-mode="1" data-speed="10">
+            <span class="mode-icon">🛴</span>
+            <span class="mode-name">Eco</span>
+            <span class="mode-speed">10 km/h</span>
+          </button>
+          <button class="mode-btn active" data-mode="0" data-speed="20">
+            <span class="mode-icon">⚡</span>
+            <span class="mode-name">Drive</span>
+            <span class="mode-speed">20 km/h</span>
+          </button>
+          <button class="mode-btn" data-mode="2" data-speed="65">
+            <span class="mode-icon">🔥</span>
+            <span class="mode-name">Sport</span>
+            <span class="mode-speed">No Limit</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Custom Speed Slider -->
+      <div class="section-card">
+        <h2>Custom Speed Limit</h2>
+        <div class="slider-container">
+          <input type="range" id="speed-slider" min="5" max="65" value="25" step="1">
+          <div class="slider-labels">
+            <span>5 km/h</span>
+            <span id="slider-value" class="slider-current">25 km/h</span>
+            <span>65 km/h</span>
+          </div>
+          <label class="persist-label">
+            <input type="checkbox" id="persist-speed" checked>
+            <span>Auto-apply on connect</span>
+          </label>
+        </div>
+        <button id="btn-apply-speed" class="btn-primary btn-full">Apply Speed Limit</button>
+      </div>
+
+      <!-- Scooter Settings -->
+      <div class="section-card">
+        <h2>Settings</h2>
+        <div class="setting-row">
+          <span>Cruise Control</span>
+          <label class="toggle">
+            <input type="checkbox" id="toggle-cruise">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="setting-row">
+          <span>Tail Light</span>
+          <label class="toggle">
+            <input type="checkbox" id="toggle-taillight">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="setting-row">
+          <span>Lock Scooter</span>
+          <button id="btn-lock" class="btn-small btn-danger">Lock</button>
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="section-card">
+        <h2>Activity Log</h2>
+        <div id="log" class="log-area"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="bluetooth.js"></script>
+  <script src="app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js');
+    }
+  </script>
+</body>
+</html>
