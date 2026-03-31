@@ -1,4 +1,4 @@
-const CACHE_NAME = 'scooterlink-v9';
+const CACHE_NAME = 'scooterlink-v10';
 const ASSETS = [
   '/',
   '/index.html',

@@ -279,6 +279,25 @@ toggleTaillight.addEventListener('change', async () => {
   }
 });
 
+// Copy activity log to clipboard
+document.getElementById('btn-copy-log').addEventListener('click', async () => {
+  const entries = Array.from(logArea.children).map(e => e.textContent).reverse();
+  const text = entries.join('\n');
+  try {
+    await navigator.clipboard.writeText(text);
+    log('Log copied to clipboard!', 'success');
+  } catch {
+    // Fallback for iOS
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    log('Log copied!', 'success');
+  }
+});
+
 btnLock.addEventListener('click', async () => {
   locked = !locked;
   try {
