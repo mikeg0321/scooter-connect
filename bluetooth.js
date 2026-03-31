@@ -196,19 +196,38 @@ class ScooterBLE {
     this._log(`GATT connected to ${this.device.name}`);
 
     // Find Nordic UART service
+    let uartChars = null;
     try {
       const svc = await this.server.getPrimaryService(ScooterBLE.SVC);
       this._log('Nordic UART: FOUND');
-      const chars = await svc.getCharacteristics();
-      for (const ch of chars) {
+      uartChars = await svc.getCharacteristics();
+      for (const ch of uartChars) {
         const p = ch.properties;
-        const id = ch.uuid.slice(4, 8);
         const flags = [p.read?'R':'', p.write?'W':'', p.writeWithoutResponse?'Wn':'', p.notify?'N':'', p.indicate?'I':''].filter(Boolean).join(',');
-        this._log(`  ${id}: ${flags} [${ch.uuid}]`);
+        this._log(`  uuid=${ch.uuid} props=${flags}`);
 
+        // Match by UUID (case-insensitive, multiple formats)
         const uuid = ch.uuid.toLowerCase();
-        if (uuid === ScooterBLE.TX || uuid.includes('6e400002')) { this.txChar = ch; this._log('  -> TX assigned'); }
-        if (uuid === ScooterBLE.RX || uuid.includes('6e400003')) { this.rxChar = ch; this._log('  -> RX assigned'); }
+        if (uuid === ScooterBLE.TX || uuid.includes('6e400002') || uuid.includes('0002')) {
+          if (p.write || p.writeWithoutResponse) { this.txChar = ch; this._log('  -> TX (uuid match)'); }
+        }
+        if (uuid === ScooterBLE.RX || uuid.includes('6e400003') || uuid.includes('0003')) {
+          if (p.notify) { this.rxChar = ch; this._log('  -> RX (uuid match)'); }
+        }
+      }
+
+      // Fallback: match by properties alone on the UART service
+      if (!this.txChar || !this.rxChar) {
+        this._log('UUID match failed, trying property match...');
+        for (const ch of uartChars) {
+          const p = ch.properties;
+          if (!this.txChar && (p.write || p.writeWithoutResponse)) {
+            this.txChar = ch; this._log(`  -> TX (by props): ${ch.uuid}`);
+          }
+          if (!this.rxChar && p.notify) {
+            this.rxChar = ch; this._log(`  -> RX (by props): ${ch.uuid}`);
+          }
+        }
       }
     } catch (e) {
       this._log(`Nordic UART: NOT FOUND (${e.message})`);
@@ -222,31 +241,11 @@ class ScooterBLE {
         const chars = await svc.getCharacteristics();
         for (const ch of chars) {
           const p = ch.properties;
-          this._log(`  ${ch.uuid.slice(4,8)}: ${[p.read?'R':'',p.write?'W':'',p.writeWithoutResponse?'Wn':'',p.notify?'N':''].filter(Boolean).join(',')}`);
-          if (p.writeWithoutResponse || p.write) { this.txChar = ch; this._log('  -> TX assigned'); }
-          if (p.notify) { this.rxChar = ch; this._log('  -> RX assigned'); }
+          this._log(`  ${ch.uuid}: ${[p.read?'R':'',p.write?'W':'',p.writeWithoutResponse?'Wn':'',p.notify?'N':''].filter(Boolean).join(',')}`);
+          if (p.writeWithoutResponse || p.write) { this.txChar = ch; this._log('  -> TX'); }
+          if (p.notify) { this.rxChar = ch; this._log('  -> RX'); }
         }
       } catch { this._log('FFE0: not found'); }
-    }
-
-    // Last resort: match by properties if UUID matching failed
-    if (!this.txChar || !this.rxChar) {
-      this._log('Trying property-based char matching...');
-      try {
-        const svc = await this.server.getPrimaryService(ScooterBLE.SVC);
-        const chars = await svc.getCharacteristics();
-        for (const ch of chars) {
-          const p = ch.properties;
-          if (!this.txChar && (p.write || p.writeWithoutResponse)) {
-            this.txChar = ch;
-            this._log(`  -> TX (by props): ${ch.uuid}`);
-          }
-          if (!this.rxChar && p.notify) {
-            this.rxChar = ch;
-            this._log(`  -> RX (by props): ${ch.uuid}`);
-          }
-        }
-      } catch {}
     }
 
     if (!this.txChar) { this._log('!! NO TX CHAR !!'); }
