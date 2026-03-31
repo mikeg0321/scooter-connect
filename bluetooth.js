@@ -202,8 +202,9 @@ class ScooterBLE {
         const flags = [p.read?'R':'', p.write?'W':'', p.writeWithoutResponse?'Wn':'', p.notify?'N':'', p.indicate?'I':''].filter(Boolean).join(',');
         this._log(`  ${id}: ${flags}`);
 
-        if (ch.uuid === ScooterBLE.TX) { this.txChar = ch; this._log('  -> TX'); }
-        if (ch.uuid === ScooterBLE.RX) { this.rxChar = ch; this._log('  -> RX'); }
+        const uuid = ch.uuid.toLowerCase();
+        if (uuid === ScooterBLE.TX || uuid.includes('6e400002')) { this.txChar = ch; this._log('  -> TX'); }
+        if (uuid === ScooterBLE.RX || uuid.includes('6e400003')) { this.rxChar = ch; this._log('  -> RX'); }
       }
     } catch (e) {
       this._log(`Nordic UART: NOT FOUND (${e.message})`);
