@@ -168,12 +168,16 @@ class ScooterBLE {
     this._debugLog = null;
     this._rxBuf = null; this._rxExpected = 0;
     this._pendingResolve = null; this._pendingTimeout = null;
+    this._pendingCmd = null;
+    this._rxQueue = [];
   }
 
   static isSupported() { return !!navigator.bluetooth; }
   get isConnected() { return this.device && this.device.gatt.connected; }
 
   _log(msg) { console.log('[BLE]', msg); if (this._debugLog) this._debugLog(msg); }
+
+  static _delay(ms) { return new Promise(r => setTimeout(r, ms)); }
 
   static packet(src, dst, cmd, idx, seg = []) {
     return new Uint8Array([0x5A, 0xA5, seg.length, src, dst, cmd, idx, ...seg]);
@@ -200,11 +204,11 @@ class ScooterBLE {
         const p = ch.properties;
         const id = ch.uuid.slice(4, 8);
         const flags = [p.read?'R':'', p.write?'W':'', p.writeWithoutResponse?'Wn':'', p.notify?'N':'', p.indicate?'I':''].filter(Boolean).join(',');
-        this._log(`  ${id}: ${flags}`);
+        this._log(`  ${id}: ${flags} [${ch.uuid}]`);
 
         const uuid = ch.uuid.toLowerCase();
-        if (uuid === ScooterBLE.TX || uuid.includes('6e400002')) { this.txChar = ch; this._log('  -> TX'); }
-        if (uuid === ScooterBLE.RX || uuid.includes('6e400003')) { this.rxChar = ch; this._log('  -> RX'); }
+        if (uuid === ScooterBLE.TX || uuid.includes('6e400002')) { this.txChar = ch; this._log('  -> TX assigned'); }
+        if (uuid === ScooterBLE.RX || uuid.includes('6e400003')) { this.rxChar = ch; this._log('  -> RX assigned'); }
       }
     } catch (e) {
       this._log(`Nordic UART: NOT FOUND (${e.message})`);
@@ -219,10 +223,30 @@ class ScooterBLE {
         for (const ch of chars) {
           const p = ch.properties;
           this._log(`  ${ch.uuid.slice(4,8)}: ${[p.read?'R':'',p.write?'W':'',p.writeWithoutResponse?'Wn':'',p.notify?'N':''].filter(Boolean).join(',')}`);
-          if (p.writeWithoutResponse || p.write) { this.txChar = ch; this._log('  -> TX'); }
-          if (p.notify) { this.rxChar = ch; this._log('  -> RX'); }
+          if (p.writeWithoutResponse || p.write) { this.txChar = ch; this._log('  -> TX assigned'); }
+          if (p.notify) { this.rxChar = ch; this._log('  -> RX assigned'); }
         }
       } catch { this._log('FFE0: not found'); }
+    }
+
+    // Last resort: match by properties if UUID matching failed
+    if (!this.txChar || !this.rxChar) {
+      this._log('Trying property-based char matching...');
+      try {
+        const svc = await this.server.getPrimaryService(ScooterBLE.SVC);
+        const chars = await svc.getCharacteristics();
+        for (const ch of chars) {
+          const p = ch.properties;
+          if (!this.txChar && (p.write || p.writeWithoutResponse)) {
+            this.txChar = ch;
+            this._log(`  -> TX (by props): ${ch.uuid}`);
+          }
+          if (!this.rxChar && p.notify) {
+            this.rxChar = ch;
+            this._log(`  -> RX (by props): ${ch.uuid}`);
+          }
+        }
+      } catch {}
     }
 
     if (!this.txChar) { this._log('!! NO TX CHAR !!'); }
@@ -244,7 +268,7 @@ class ScooterBLE {
     // Init crypto and authenticate
     this.crypto = new NinebotCrypto();
     await this.crypto.init(this.device.name);
-    this._log(`Crypto init: key=${Array.from(this.crypto.key.slice(0,4)).map(b=>b.toString(16).padStart(2,'0')).join('')}...`);
+    this._log(`Crypto init: name="${this.device.name}" key=${Array.from(this.crypto.key.slice(0,4)).map(b=>b.toString(16).padStart(2,'0')).join('')}...`);
 
     await this._auth();
     return this.device.name || 'Unknown Scooter';
@@ -261,25 +285,11 @@ class ScooterBLE {
   async _send(rawPacket) {
     if (!this.txChar) throw new Error('No TX characteristic');
     const enc = await this.crypto.encrypt(rawPacket);
-    const hex = Array.from(enc.slice(0, 12)).map(b => b.toString(16).padStart(2, '0')).join(' ');
-    this._log(`TX ${enc.length}b: ${hex}...`);
+    const hex = Array.from(enc).map(b => b.toString(16).padStart(2, '0')).join(' ');
+    this._log(`TX ${enc.length}b: ${hex}`);
     const useResp = this.txChar.properties.write && !this.txChar.properties.writeWithoutResponse;
     for (let i = 0; i < enc.length; i += 20) {
       const chunk = enc.slice(i, i + 20);
-      if (useResp) await this.txChar.writeValueWithResponse(chunk);
-      else await this.txChar.writeValueWithoutResponse(chunk);
-    }
-  }
-
-  // Send raw unencrypted bytes (for fallback testing)
-  async _sendRaw(bytes) {
-    if (!this.txChar) throw new Error('No TX characteristic');
-    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    const hex = Array.from(data).map(b => b.toString(16).padStart(2, '0')).join(' ');
-    this._log(`TX-RAW ${data.length}b: ${hex}`);
-    const useResp = this.txChar.properties.write && !this.txChar.properties.writeWithoutResponse;
-    for (let i = 0; i < data.length; i += 20) {
-      const chunk = data.slice(i, i + 20);
       if (useResp) await this.txChar.writeValueWithResponse(chunk);
       else await this.txChar.writeValueWithoutResponse(chunk);
     }
@@ -293,12 +303,13 @@ class ScooterBLE {
     if (chunk.length >= 2 && chunk[0] === 0x5A && chunk[1] === 0xA5) {
       this._rxBuf = new Uint8Array(chunk);
       this._rxExpected = chunk.length >= 3 ? chunk[2] + 13 : 999;
+      this._log(`RX expect ${this._rxExpected}b (bLen=${chunk[2]})`);
     } else if (this._rxBuf) {
       const m = new Uint8Array(this._rxBuf.length + chunk.length);
       m.set(this._rxBuf); m.set(chunk, this._rxBuf.length);
       this._rxBuf = m;
+      this._log(`RX accum ${this._rxBuf.length}/${this._rxExpected}b`);
     } else {
-      // Not a 5AA5 packet - might be raw data, still resolve pending
       if (this._pendingResolve) {
         clearTimeout(this._pendingTimeout);
         this._pendingResolve({ raw: chunk });
@@ -308,8 +319,9 @@ class ScooterBLE {
     }
 
     if (this._rxBuf && this._rxBuf.length >= this._rxExpected) {
-      this._processPacket(this._rxBuf.slice(0, this._rxExpected));
+      const pktData = this._rxBuf.slice(0, this._rxExpected);
       this._rxBuf = null;
+      this._processPacket(pktData);
     }
   }
 
@@ -320,27 +332,35 @@ class ScooterBLE {
       this._log(`DEC: ${hex}`);
       const pkt = { src: dec[3], dst: dec[4], cmd: dec[5], idx: dec[6], data: dec.slice(7) };
 
-      if (this._pendingResolve) {
+      // Only resolve pending if this matches what we're waiting for, or is an auth response
+      const isAuthResp = (pkt.cmd === 0x5B || pkt.cmd === 0x5C || pkt.cmd === 0x5D);
+      const isExpected = !this._pendingCmd || isAuthResp ||
+        pkt.cmd === 0x04 || pkt.cmd === 0x05;
+
+      if (this._pendingResolve && isExpected) {
         clearTimeout(this._pendingTimeout);
         this._pendingResolve(pkt);
         this._pendingResolve = null;
+        this._pendingCmd = null;
       }
       if ((pkt.cmd === 0x04 || pkt.cmd === 0x05) && this.onData) this.onData(pkt);
     } catch (e) {
       this._log(`Decrypt err: ${e.message}`);
-      // Still resolve pending so auth doesn't hang
       if (this._pendingResolve) {
         clearTimeout(this._pendingTimeout);
         this._pendingResolve({ error: e.message, raw: encrypted });
         this._pendingResolve = null;
+        this._pendingCmd = null;
       }
     }
   }
 
-  _waitResp(ms = 5000) {
+  _waitResp(ms = 5000, cmd = null) {
     return new Promise((resolve, reject) => {
+      this._pendingCmd = cmd;
       this._pendingTimeout = setTimeout(() => {
         this._pendingResolve = null;
+        this._pendingCmd = null;
         reject(new Error('Timeout'));
       }, ms);
       this._pendingResolve = resolve;
@@ -353,55 +373,79 @@ class ScooterBLE {
       return;
     }
 
-    try {
-      // Step 1: INIT
-      this._log('Auth: sending INIT...');
-      const initPkt = ScooterBLE.packet(0x3E, 0x21, 0x5B, 0x00);
-      const w1 = this._waitResp(8000);
-      await this._send(initPkt);
-      const r1 = await w1;
-      if (r1.error) { this._log(`INIT decrypt failed: ${r1.error}`); return; }
-      if (r1.raw) { this._log('INIT: got raw (non-5AA5) response'); return; }
-      this._log(`INIT resp: cmd=0x${r1.cmd.toString(16)} idx=${r1.idx} data=${r1.data.length}b`);
-
-      // Step 2: PING
-      const appKey = new Uint8Array(16);
-      crypto.getRandomValues(appKey);
-      this._log('Auth: sending PING...');
-      const pingPkt = ScooterBLE.packet(0x3E, 0x21, 0x5C, 0x00, Array.from(appKey));
-      const w2 = this._waitResp(8000);
-      await this._send(pingPkt);
-      const r2 = await w2;
-      if (r2.error) { this._log(`PING decrypt failed: ${r2.error}`); return; }
-      if (r2.raw) { this._log('PING: got raw response'); return; }
-      this._log(`PING resp: cmd=0x${r2.cmd.toString(16)} idx=${r2.idx}`);
-
-      // Step 3: PAIR if needed
-      if (r2.idx === 0 && r1.data.length >= 16) {
-        const serial = r1.data.slice(16);
-        this._log(`Auth: PAIR needed, serial=${serial.length}b`);
-        for (let i = 0; i < 5; i++) {
-          const pairPkt = ScooterBLE.packet(0x3E, 0x21, 0x5D, 0x00, Array.from(serial));
-          const w3 = this._waitResp(5000);
-          await this._send(pairPkt);
-          try {
-            const r3 = await w3;
-            this._log(`PAIR ${i}: cmd=0x${(r3.cmd||0).toString(16)} idx=${r3.idx}`);
-            if (r3.cmd === 0x5C && r3.idx === 1) break;
-          } catch { this._log(`PAIR ${i}: timeout`); }
-        }
+    // Retry auth up to 3 times
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt > 0) {
+        this._log(`Auth retry ${attempt}/2...`);
+        this.crypto = new NinebotCrypto();
+        await this.crypto.init(this.device.name);
+        await ScooterBLE._delay(1000);
       }
 
-      this.authenticated = true;
-      this._log('AUTH SUCCESS');
-    } catch (e) {
-      this._log(`AUTH FAILED: ${e.message}`);
-      this.authenticated = false;
+      try {
+        // Step 1: INIT
+        this._log('Auth: sending INIT...');
+        const initPkt = ScooterBLE.packet(0x3E, 0x21, 0x5B, 0x00);
+        const w1 = this._waitResp(8000, 0x5B);
+        await this._send(initPkt);
+        const r1 = await w1;
+        if (r1.error) { this._log(`INIT decrypt failed: ${r1.error}`); continue; }
+        if (r1.raw) { this._log('INIT: got raw (non-5AA5) response'); continue; }
+        this._log(`INIT resp: cmd=0x${r1.cmd.toString(16)} idx=${r1.idx} data=${r1.data.length}b`);
 
-      // Fallback: try raw unencrypted commands
-      this._log('Trying raw unencrypted mode...');
-      this.crypto = { encrypt: async (d) => d, decrypt: async (d) => d };
+        if (r1.data.length >= 16) {
+          const bleHex = Array.from(r1.data.slice(0, 16)).map(b => b.toString(16).padStart(2, '0')).join('');
+          this._log(`INIT bleData: ${bleHex}`);
+          this._log(`INIT rekey: ${Array.from(this.crypto.key.slice(0,4)).map(b=>b.toString(16).padStart(2,'0')).join('')}...`);
+        }
+
+        // Small delay to let Bluefy + scooter settle after INIT
+        await ScooterBLE._delay(300);
+
+        // Step 2: PING
+        const appKey = new Uint8Array(16);
+        crypto.getRandomValues(appKey);
+        this._log(`Auth: sending PING (appKey=${Array.from(appKey.slice(0,4)).map(b=>b.toString(16).padStart(2,'0')).join('')}...)...`);
+        const pingPkt = ScooterBLE.packet(0x3E, 0x21, 0x5C, 0x00, Array.from(appKey));
+        const w2 = this._waitResp(8000, 0x5C);
+        await this._send(pingPkt);
+        const r2 = await w2;
+        if (r2.error) { this._log(`PING decrypt failed: ${r2.error}`); continue; }
+        if (r2.raw) { this._log('PING: got raw response'); continue; }
+        this._log(`PING resp: cmd=0x${r2.cmd.toString(16)} idx=${r2.idx}`);
+
+        // Step 3: PAIR if needed (idx=0 means not yet paired, need button press)
+        if (r2.idx === 0 && r1.data.length >= 16) {
+          const serial = r1.data.slice(16);
+          const serialStr = new TextDecoder().decode(serial);
+          this._log(`PAIR needed — press scooter POWER BUTTON now! Serial: ${serialStr}`);
+          for (let i = 0; i < 10; i++) {
+            await ScooterBLE._delay(500);
+            const pairPkt = ScooterBLE.packet(0x3E, 0x21, 0x5D, 0x00, Array.from(serial));
+            const w3 = this._waitResp(3000, 0x5C);
+            await this._send(pairPkt);
+            try {
+              const r3 = await w3;
+              this._log(`PAIR ${i}: cmd=0x${(r3.cmd||0).toString(16)} idx=${r3.idx}`);
+              if (r3.cmd === 0x5C && r3.idx === 1) {
+                this._log('PAIR accepted!');
+                break;
+              }
+            } catch { this._log(`PAIR ${i}: timeout (press power button!)`); }
+          }
+        }
+
+        this.authenticated = true;
+        this._log('AUTH SUCCESS');
+        return;
+      } catch (e) {
+        this._log(`AUTH attempt ${attempt} FAILED: ${e.message}`);
+      }
     }
+
+    this._log('AUTH FAILED after 3 attempts — falling back to unencrypted');
+    this.authenticated = false;
+    this.crypto = { encrypt: async (d) => d, decrypt: async (d) => d };
   }
 
   // Commands (encrypted)
